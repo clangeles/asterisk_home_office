@@ -1,0 +1,199 @@
+[internal]
+
+; testing only working audio in folder
+exten => 999,1,Answer()
+ same => n,Set(CHANNEL(audioreadformat)=slin)
+ same => n,Set(CHANNEL(audiowriteformat)=slin)
+ same => n,MixMonitor(/var/spool/asterisk/monitor/test.wav)
+ same => n,Playback(demo-congrats)
+ same => n,Hangup()
+
+; listen to recorded sound working with PIN
+exten => 555,1,Answer()
+ same => n,Authenticate(1234)   ; <-- change PIN here
+ same => n,Set(LASTFILE=${SHELL(ls -t /var/spool/asterisk/monitor/*.wav | head -n 1 | sed 's/\.wav$//' | tr -d '\n')})
+ same => n,NoOp(Last file is: ${LASTFILE})
+ same => n,Playback(${LASTFILE})
+ same => n,Hangup()
+
+; page auto answer call to 103 and record
+exten => 200,1,NoOp(Paging with recording)
+ same => n,Set(FILENAME=${STRFTIME(${EPOCH},,%Y%m%d-%H%M%S)}-page-${EXTEN})
+ ; Removed 'b' option: 'b' only records while bridged. Page works differently.
+ same => n,MixMonitor(/var/spool/asterisk/monitor/${FILENAME}.wav)
+ same => n,Set(PJSIP_HEADER(add,Alert-Info)=<http://www.cisco.com>;info=alert-autoanswer)
+ ; The audio happens inside the Page app
+ same => n,Page(PJSIP/103,A(custom/playmsg))
+ same => n,Hangup()
+
+
+; 1. Internal Extension Logic (3-digit) + recording
+exten => _1XX,1,NoOp(Internal call)
+ same => n,Set(FILENAME=${UNIQUEID}-${CALLERID(num)}-${EXTEN})
+ same => n,MixMonitor(/var/spool/asterisk/monitor/${FILENAME}.wav,b)
+ same => n,Dial(PJSIP/${EXTEN},20,tT)
+ same => n,Hangup()
+
+; outbound call mobile
+exten => _9X.,1,NoOp(Outbound via GoIP)
+ same => n,Set(NUMBER=${EXTEN:1})
+ same => n,Set(FILENAME=${UNIQUEID}-${CALLERID(num)}-to-${NUMBER})
+ same => n,MixMonitor(/var/spool/asterisk/monitor/${FILENAME}.wav,b)
+ same => n,Dial(PJSIP/${NUMBER}@goip1,60)
+ same => n,Hangup()
+
+; 3. Special Handlers
+exten => i,1,Playback(pbx-invalid)
+ same => n,Hangup()
+
+exten => t,1,Hangup() ; Handle timeouts
+
+; --- 4. Outbound Status Handler (New) ---
+; Provides audio feedback if the GoIP is busy or down
+
+
+; ===== Conference 701 =====
+exten => 701,1,NoOp(Conference 701)
+ same => n,Answer()
+ same => n,Wait(1)
+
+ same => n,Playback(vm-password)
+ same => n,Playback(beep)
+ same => n,Read(PIN,,4,,1,10)
+
+ ; ADMIN PIN
+ same => n,GotoIf($["${PIN}"="9999"]?admin)
+
+ ; USER PIN
+ same => n,GotoIf($["${PIN}"="1234"]?user)
+ same => n,Playback(auth-incorrect)
+ same => n,Hangup()
+
+ ; ===== ADMIN =====
+ same => n(admin),NoOp(Admin joined - start recording)
+
+ ; start recording ONLY here
+ same => n,Set(FILENAME=${STRFTIME(${EPOCH},,%Y%m%d-%H%M%S)}-conf-701)
+ same => n,MixMonitor(/var/spool/asterisk/monitor/${FILENAME}.wav)
+ same => n,ConfBridge(701,default_bridge,admin_user)
+
+ ; stop recording when admin leaves
+ same => n,StopMixMonitor()
+ same => n,Hangup()
+
+ ; ===== USER =====
+ same => n(user),NoOp(User joined - no recording)
+ same => n,ConfBridge(701,default_bridge,user_wait)
+ same => n,Hangup()
+
+
+; youtube audio live streaming
+exten => 400,1,NoOp(Enter ARI Youtube App)
+same => n,Stasis(youtube)
+same => n,Hangup()
+
+
+; IVR Calling system
+exten => 800,1,NoOp(Incoming call from GOIP → IVR)
+  same => n,Goto(ivr,s,1)
+
+;exten => _X.,1,NoOp(Incoming call from GOIP → IVR)
+; same => n,Goto(ivr,s,1)
+
+
+
+
+[playmsg]
+exten => s,1,NoOp(Playing audio on 103)
+ same => n,Answer()
+ same => n,Playback(demo-congrats)
+ same => n,Return()
+
+[from-goip]
+exten => 107,1,Dial(PJSIP/103,30)
+ same => n,GotoIf($["${DIALSTATUS}"="ANSWER"]?end)
+ same => n,Dial(PJSIP/92209770276151@goip1,60)
+ same => n,Hangup()
+
+exten => 106,1,Dial(PJSIP/106,30)
+ same => n,Hangup()
+
+exten => _X.,1,Dial(PJSIP/108,30)
+ same => n,Hangup()
+
+
+
+; IVR Calling system
+;exten => s,1,NoOp(Incoming call from GOIP → IVR)
+; same => n,Goto(ivr,s,1)
+
+;exten => _X.,1,NoOp(Incoming call from GOIP → IVR)
+; same => n,Goto(ivr,s,1)
+
+
+
+[ivr]
+
+exten => s,1,Answer()
+same => n,Wait(0.3)
+same => n,Set(TIMEOUT(digit)=3)
+same => n,Set(TIMEOUT(response)=8)
+same => n,Set(RETRY=0)
+same => n,Goto(start,1)
+;same => n(start),Background(custom/menuvoice)
+;same => n,WaitExten()
+
+; VALID with existence check
+exten => _1XX,1,NoOp(User entered ${EXTEN})
+same => n,GotoIf($[${DIALPLAN_EXISTS(internal,${EXTEN},1)}]?valid:invalid)
+same => n(valid),Goto(internal,${EXTEN},1)
+same => n(invalid),Goto(ivr,i,1)
+
+exten => start,1,NoOp(IVR Restart)
+ same => n,Background(custom/menuvoice)
+ same => n,Read(dummy,,5,,1,1)
+ same => n,WaitExten()
+
+
+; INVALID catch
+exten => _X,1,Goto(ivr,i,1)
+exten => _X.,1,Goto(ivr,i,1)
+
+; INVALID handler
+exten => i,1,NoOp(Invalid input)
+same => n,Set(RETRY=$[${RETRY}+1])
+; same => GotoIf($[${RETRY}>=3]?ivr,fail,1) --- change
+same => n,GotoIf($[${RETRY}>=3]?ivr,fail,1)
+same => n,Playback(pbx-invalid)
+same => n,Wait(0.5)
+same => n,Read(dummy,,5,,1,1)
+;same => n,Goto(ivr,start,1)
+same => n,Goto(start,1)
+
+; TIMEOUT handler
+exten => t,1,NoOp(Timeout)
+same => n,Set(RETRY=$[${RETRY}+1])
+same => n,GotoIf($[${RETRY}>=3]?ivr,fail,1)
+same => n,Playback(pbx-noinput)
+same => n,Wait(0.5)
+;same => n,Read(dummy,,5,,1,1)
+same => n,Goto(ivr,start,1)
+
+; FAIL
+exten => fail,1,Playback(vm-goodbye)
+same => n,Hangup()
+
+
+
+
+[outbound-status]
+exten => BUSY,1,Playtones(busy)
+ same => n,Wait(3)
+ same => n,Hangup()
+
+exten => CONGESTION,1,Playtones(congestion)
+ same => n,Wait(3)
+ same => n,Hangup()
+
+exten => _X.,1,Hangup() ; Catch-all for any other status
+
